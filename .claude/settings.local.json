@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/natha/.claude/plugins/marketplaces/claude-plugins-official/plugins/explanatory-output-style/**)",
+      "Read(//home/natha/.claude/plugins/marketplaces/claude-plugins-official/plugins/learning-output-style/**)",
+      "Skill(update-config)",
+      "Bash(find / -maxdepth 6 -iname \"*output-styles*\" -type d)",
+      "Bash(find / -maxdepth 8 -path \"*output-styles*\" -name \"*.md\")"
+    ]
+  },
+  "outputStyle": "Explanatory"
+}
