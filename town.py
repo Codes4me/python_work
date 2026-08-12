@@ -45,6 +45,7 @@ HOUSE_COLOR = (190, 140, 90)
 HOUSE_OUTLINE_COLOR = (120, 85, 50)
 PARK_COLOR = (70, 130, 80)
 PARK_OUTLINE_COLOR = (35, 90, 45)
+STATUS_BG_COLOR = (15, 17, 21)
 
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("Town")
@@ -322,9 +323,17 @@ def add_merged_segment(start, end, road_type="street"):
             break
         new_road = merged
     roads.append(new_road)
-    clear_status()
+    road_polygon = road_to_polygon(new_road)
+    destroyed = [house for house in houses if polygons_overlap(house, road_polygon, tol=0)]
+    for house in destroyed:
+        houses.remove(house)
     if road_type == "street":
-        recalculate_parks_for_polygon(road_to_polygon(new_road))
+        recalculate_parks_for_polygon(road_polygon)
+    if destroyed:
+        refresh_all_parks()
+        set_status("Placed {} and removed {} house(s)".format(road_type, len(destroyed)))
+    else:
+        clear_status()
 
 
 def add_road(start, end, road_type="street"):
@@ -523,35 +532,29 @@ def cells_adjacent(cells_a, cells_b):
     return False
 
 
-def grow_park_rect(seed_col, seed_row, extra_blocked=frozenset()):
-    if not cell_free_for_park(seed_col, seed_row, extra_blocked):
+def grow_park_region(seed_col, seed_row):
+    if not cell_free_for_park(seed_col, seed_row):
         return None
-    left = right = seed_col
-    top = bottom = seed_row
-    expanded = True
-    while expanded:
-        expanded = False
-        if all(cell_free_for_park(left - 1, r, extra_blocked) for r in range(top, bottom + 1)):
-            left -= 1
-            expanded = True
-        if all(cell_free_for_park(right + 1, r, extra_blocked) for r in range(top, bottom + 1)):
-            right += 1
-            expanded = True
-        if all(cell_free_for_park(c, top - 1, extra_blocked) for c in range(left, right + 1)):
-            top -= 1
-            expanded = True
-        if all(cell_free_for_park(c, bottom + 1, extra_blocked) for c in range(left, right + 1)):
-            bottom += 1
-            expanded = True
-    if (right - left + 1) < MIN_PARK_SQUARES or (bottom - top + 1) < MIN_PARK_SQUARES:
+    region = {(seed_col, seed_row)}
+    frontier = [(seed_col, seed_row)]
+    while frontier:
+        col, row = frontier.pop()
+        for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            neighbor = (col + dc, row + dr)
+            if neighbor in region:
+                continue
+            if cell_free_for_park(neighbor[0], neighbor[1]):
+                region.add(neighbor)
+                frontier.append(neighbor)
+    if len(region) < MIN_PARK_SQUARES * MIN_PARK_SQUARES:
         return None
-    return {(c, r) for c in range(left, right + 1) for r in range(top, bottom + 1)}
+    return region
 
 
 def place_park(click_pos):
     seed_col = int(click_pos[0] // GRID_SIZE)
     seed_row = int(click_pos[1] // GRID_SIZE)
-    cells = grow_park_rect(seed_col, seed_row)
+    cells = grow_park_region(seed_col, seed_row)
     if cells is None:
         set_status("Not enough space for a park (needs at least {}x{})".format(
             MIN_PARK_SQUARES, MIN_PARK_SQUARES
@@ -562,25 +565,21 @@ def place_park(click_pos):
         return
     merged_cells = set(cells)
     merged_origins = {(seed_col, seed_row)}
-    merged_excluded = set()
     for park in list(parks):
         if cells_adjacent(cells, park["cells"]):
             merged_cells |= park["cells"]
             merged_origins |= park["origins"]
-            merged_excluded |= park["excluded"]
             parks.remove(park)
-    parks.append({"cells": merged_cells, "origins": merged_origins, "excluded": merged_excluded})
+    parks.append({"cells": merged_cells, "origins": merged_origins})
     clear_status()
 
 
-def recalculate_park(park, polygon):
-    newly_excluded = {cell for cell in park["cells"] if polygons_overlap(cell_polygon(*cell), polygon, tol=0)}
-    park["excluded"] |= newly_excluded
+def recalculate_park(park):
     park["cells"] = set()
     new_cells = set()
     surviving_origins = set()
     for origin in park["origins"]:
-        result = grow_park_rect(*origin, extra_blocked=park["excluded"])
+        result = grow_park_region(*origin)
         if result is not None:
             new_cells |= result
             surviving_origins.add(origin)
@@ -594,7 +593,12 @@ def recalculate_park(park, polygon):
 def recalculate_parks_for_polygon(polygon):
     for park in list(parks):
         if any(polygons_overlap(cell_polygon(*cell), polygon, tol=0) for cell in park["cells"]):
-            recalculate_park(park, polygon)
+            recalculate_park(park)
+
+
+def refresh_all_parks():
+    for park in list(parks):
+        recalculate_park(park)
 
 
 def find_hovered_park(pos):
@@ -606,15 +610,24 @@ def find_hovered_park(pos):
     return None
 
 
+def format_points(points):
+    return ";".join("{}:{}".format(round(x, 2), round(y, 2)) for x, y in points)
+
+
 def export_roads_to_csv():
     with open(EXPORT_PATH, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["road_id", "type", "start_x", "start_y", "end_x", "end_y"])
+        writer.writerow(["kind", "id", "part", "road_type", "points"])
         for i, road in enumerate(roads):
-            sx, sy = road["start"]
-            ex, ey = road["end"]
-            writer.writerow([i, road["type"], round(sx, 2), round(sy, 2), round(ex, 2), round(ey, 2)])
-    set_status("Exported {} road(s) to {}".format(len(roads), EXPORT_PATH))
+            writer.writerow(["road", i, 0, road["type"], format_points([road["start"], road["end"]])])
+        for i, house in enumerate(houses):
+            writer.writerow(["house", i, 0, "", format_points(house)])
+        for i, park in enumerate(parks):
+            cell_list = ";".join("{}:{}".format(c, r) for c, r in sorted(park["cells"]))
+            writer.writerow(["park", i, 0, "", cell_list])
+    set_status("Exported {} road(s), {} house(s), {} park(s) to {}".format(
+        len(roads), len(houses), len(parks), EXPORT_PATH
+    ))
 
 
 def draw_grid(surface):
@@ -668,11 +681,12 @@ def point_segment_distance(point, a, b):
 
 def houses_on_road(road):
     start, end = road["start"], road["end"]
+    edge_tolerance = road_width(road) / 2 + OVERLAP_TOLERANCE
     return [
         house
         for house in houses
-        if point_segment_distance(house[0], start, end) <= OVERLAP_TOLERANCE
-        and point_segment_distance(house[1], start, end) <= OVERLAP_TOLERANCE
+        if point_segment_distance(house[0], start, end) <= edge_tolerance
+        and point_segment_distance(house[1], start, end) <= edge_tolerance
     ]
 
 
@@ -745,6 +759,7 @@ while running:
                 if hovered_house is not None:
                     houses.remove(hovered_house)
                     hovered_house = None
+                    refresh_all_parks()
                     set_status("Deleted house")
                 elif hovered_road is not None:
                     attached_houses = houses_on_road(hovered_road)
@@ -752,6 +767,7 @@ while running:
                         houses.remove(house)
                     roads.remove(hovered_road)
                     hovered_road = None
+                    refresh_all_parks()
                     if attached_houses:
                         set_status("Deleted road and {} house(s)".format(len(attached_houses)))
                     else:
@@ -838,10 +854,11 @@ while running:
             pygame.draw.rect(screen, HOVER_COLOR, pygame.Rect(
                 cell[0] * GRID_SIZE, cell[1] * GRID_SIZE, GRID_SIZE, GRID_SIZE
             ), 2)
-    if hovered_road is not None:
-        pygame.draw.line(screen, HOVER_COLOR, hovered_road["start"], hovered_road["end"], 12)
     draw_houses(screen)
     draw_roads(screen)
+    if hovered_road is not None:
+        border_polygon = road_to_polygon(hovered_road, width=road_width(hovered_road) + 6)
+        pygame.draw.polygon(screen, HOVER_COLOR, border_polygon, 3)
     if hovered_house is not None:
         pygame.draw.polygon(screen, HOVER_COLOR, hovered_house, 4)
 
@@ -861,7 +878,10 @@ while running:
 
     if status_message:
         status_surface = small_font.render(status_message, True, TEXT_COLOR)
-        screen.blit(status_surface, (670, 22))
+        padding = 8
+        bg_rect = status_surface.get_rect(topleft=(padding, padding)).inflate(padding, padding)
+        pygame.draw.rect(screen, STATUS_BG_COLOR, bg_rect, border_radius=4)
+        screen.blit(status_surface, (padding, padding))
 
     pygame.display.flip()
     clock.tick(60)
