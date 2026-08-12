@@ -23,6 +23,7 @@ MIN_HOUSE_WIDTH = 1
 MAX_HOUSE_WIDTH = 5
 HOUSE_DEPTH_SQUARES = 2
 ROAD_DRAW_WIDTH = 6
+PATH_DRAW_WIDTH = 3
 ROAD_HOUSE_CLEARANCE = ROAD_DRAW_WIDTH * 2
 EXPORT_PATH = "roads.csv"
 
@@ -34,6 +35,7 @@ BUTTON_SELECTED_COLOR = (255, 255, 255)
 TEXT_COLOR = (255, 255, 255)
 TEXT_SELECTED_COLOR = (25, 28, 34)
 ROAD_COLOR = (150, 155, 165)
+PATH_COLOR = (170, 160, 130)
 ROAD_ENDPOINT_COLOR = (200, 205, 215)
 PREVIEW_COLOR = (255, 210, 90)
 HEX_MARKER_COLOR = (120, 200, 255)
@@ -68,13 +70,14 @@ class Button:
 
 
 road_button = Button("Road", 10, 10, 100, 40)
-select_button = Button("Select", 120, 10, 100, 40)
-hexagon_button = Button("Hexagon", 230, 10, 100, 40)
-houses_button = Button("Houses", 340, 10, 100, 40)
-tool_buttons = [road_button, select_button, hexagon_button, houses_button]
+path_button = Button("Path", 120, 10, 100, 40)
+select_button = Button("Select", 230, 10, 100, 40)
+hexagon_button = Button("Hexagon", 340, 10, 100, 40)
+houses_button = Button("Houses", 450, 10, 100, 40)
+tool_buttons = [road_button, path_button, select_button, hexagon_button, houses_button]
 
-angle_snap_button = Button("Snap 30°", 460, 6, 90, 24, use_font=small_font)
-grid_snap_button = Button("Snap Grid", 460, 32, 90, 24, use_font=small_font)
+angle_snap_button = Button("Snap 30°", 570, 6, 90, 24, use_font=small_font)
+grid_snap_button = Button("Snap Grid", 570, 32, 90, 24, use_font=small_font)
 angle_snap_button.selected = True
 grid_snap_button.selected = True
 toggle_buttons = [angle_snap_button, grid_snap_button]
@@ -198,6 +201,8 @@ def collinear(a, b, c):
 
 def try_merge_once(new_road):
     for road in roads:
+        if road["type"] != new_road["type"]:
+            continue
         if points_close(road["end"], new_road["start"]):
             shared, far_existing, far_new = road["end"], road["start"], new_road["end"]
         elif points_close(road["start"], new_road["start"]):
@@ -210,7 +215,7 @@ def try_merge_once(new_road):
             continue
         if collinear(far_existing, shared, far_new):
             roads.remove(road)
-            return {"start": far_existing, "end": far_new}
+            return {"start": far_existing, "end": far_new, "type": new_road["type"]}
     return None
 
 
@@ -301,10 +306,10 @@ def violates_min_spacing(start, end):
     return False
 
 
-def add_merged_segment(start, end):
+def add_merged_segment(start, end, road_type="road"):
     if points_close(start, end):
         return
-    new_road = {"start": start, "end": end}
+    new_road = {"start": start, "end": end, "type": road_type}
     while True:
         merged = try_merge_once(new_road)
         if merged is None:
@@ -314,14 +319,14 @@ def add_merged_segment(start, end):
     clear_status()
 
 
-def add_road(start, end):
+def add_road(start, end, road_type="road"):
     if points_close(start, end):
         return
     if violates_min_spacing(start, end):
         set_status("Road rejected: too close to an existing intersection")
         return
     for seg_start, seg_end in subtract_overlaps(start, end):
-        add_merged_segment(seg_start, seg_end)
+        add_merged_segment(seg_start, seg_end, road_type)
 
 
 def compute_hexagon_vertices(v1, v2):
@@ -380,7 +385,13 @@ def polygons_overlap(poly_a, poly_b, tol=OVERLAP_TOLERANCE):
     return True
 
 
-def road_to_polygon(road, width=ROAD_DRAW_WIDTH):
+def road_width(road):
+    return PATH_DRAW_WIDTH if road.get("type") == "path" else ROAD_DRAW_WIDTH
+
+
+def road_to_polygon(road, width=None):
+    if width is None:
+        width = road_width(road)
     start, end = road["start"], road["end"]
     dir_unit = normalize((end[0] - start[0], end[1] - start[1]))
     perp = (-dir_unit[1], dir_unit[0])
@@ -394,10 +405,12 @@ def road_to_polygon(road, width=ROAD_DRAW_WIDTH):
     ]
 
 
-def find_road_near(pos, threshold=ROAD_HOVER_THRESHOLD):
+def find_road_near(pos, threshold=ROAD_HOVER_THRESHOLD, road_type=None):
     nearest = None
     nearest_dist = threshold
     for road in roads:
+        if road_type is not None and road["type"] != road_type:
+            continue
         d = point_segment_distance(pos, road["start"], road["end"])
         if d <= nearest_dist:
             nearest = road
@@ -452,11 +465,11 @@ def place_houses_along_road(road, click_pos):
 def export_roads_to_csv():
     with open(EXPORT_PATH, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["road_id", "start_x", "start_y", "end_x", "end_y"])
+        writer.writerow(["road_id", "type", "start_x", "start_y", "end_x", "end_y"])
         for i, road in enumerate(roads):
             sx, sy = road["start"]
             ex, ey = road["end"]
-            writer.writerow([i, round(sx, 2), round(sy, 2), round(ex, 2), round(ey, 2)])
+            writer.writerow([i, road["type"], round(sx, 2), round(sy, 2), round(ex, 2), round(ey, 2)])
     set_status("Exported {} road(s) to {}".format(len(roads), EXPORT_PATH))
 
 
@@ -469,7 +482,8 @@ def draw_grid(surface):
 
 def draw_roads(surface):
     for road in roads:
-        pygame.draw.line(surface, ROAD_COLOR, road["start"], road["end"], ROAD_DRAW_WIDTH)
+        color = PATH_COLOR if road["type"] == "path" else ROAD_COLOR
+        pygame.draw.line(surface, color, road["start"], road["end"], road_width(road))
         pygame.draw.circle(surface, ROAD_ENDPOINT_COLOR, road["start"], 4)
         pygame.draw.circle(surface, ROAD_ENDPOINT_COLOR, road["end"], 4)
 
@@ -595,7 +609,7 @@ while running:
                 clicked_ui = True
 
             if not clicked_ui and event.pos[1] > TOOLBAR_HEIGHT:
-                if selected_tool == "Road":
+                if selected_tool in ("Road", "Path"):
                     drag_start = resolve_point(event.pos)
                     drag_end = drag_start
                 elif selected_tool == "Hexagon":
@@ -609,16 +623,19 @@ while running:
                         hex_state = "second_down"
                 elif selected_tool == "Houses":
                     target_road = find_road_near(event.pos)
-                    if target_road is not None:
-                        place_houses_along_road(target_road, event.pos)
-                    else:
+                    if target_road is None:
                         set_status("No road nearby to place houses on")
+                    elif target_road["type"] == "path":
+                        set_status("Can't place houses on a path")
+                    else:
+                        place_houses_along_road(target_road, event.pos)
 
         elif event.type == pygame.MOUSEBUTTONUP:
             if drag_start is not None:
                 pos = clamp_to_canvas(event.pos)
                 final_end = resolve_point(pos, start=drag_start)
-                add_road(drag_start, final_end)
+                road_type = "path" if selected_tool == "Path" else "road"
+                add_road(drag_start, final_end, road_type)
                 drag_start = None
                 drag_end = None
 
@@ -669,7 +686,7 @@ while running:
 
     if status_message:
         status_surface = small_font.render(status_message, True, TEXT_COLOR)
-        screen.blit(status_surface, (570, 22))
+        screen.blit(status_surface, (670, 22))
 
     pygame.display.flip()
     clock.tick(60)
