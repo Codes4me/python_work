@@ -22,8 +22,10 @@ PREFERRED_HOUSE_WIDTH = 3
 MIN_HOUSE_WIDTH = 1
 MAX_HOUSE_WIDTH = 5
 HOUSE_DEPTH_SQUARES = 2
-ROAD_DRAW_WIDTH = 6
-ROAD_HOUSE_CLEARANCE = ROAD_DRAW_WIDTH * 2
+ROAD_DRAW_WIDTH = GRID_SIZE * 2
+PATH_DRAW_WIDTH = GRID_SIZE * 1
+ROAD_HOUSE_CLEARANCE = GRID_SIZE // 2
+MIN_PARK_SQUARES = 5
 EXPORT_PATH = "roads.csv"
 
 BG_COLOR = (40, 44, 52)
@@ -34,12 +36,16 @@ BUTTON_SELECTED_COLOR = (255, 255, 255)
 TEXT_COLOR = (255, 255, 255)
 TEXT_SELECTED_COLOR = (25, 28, 34)
 ROAD_COLOR = (150, 155, 165)
+PATH_COLOR = (170, 160, 130)
 ROAD_ENDPOINT_COLOR = (200, 205, 215)
 PREVIEW_COLOR = (255, 210, 90)
 HEX_MARKER_COLOR = (120, 200, 255)
 HOVER_COLOR = (230, 70, 70)
 HOUSE_COLOR = (190, 140, 90)
 HOUSE_OUTLINE_COLOR = (120, 85, 50)
+PARK_COLOR = (70, 130, 80)
+PARK_OUTLINE_COLOR = (35, 90, 45)
+STATUS_BG_COLOR = (15, 17, 21)
 
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 pygame.display.set_caption("Town")
@@ -67,25 +73,28 @@ class Button:
         return self.rect.collidepoint(pos)
 
 
-road_button = Button("Road", 10, 10, 100, 40)
-select_button = Button("Select", 120, 10, 100, 40)
-hexagon_button = Button("Hexagon", 230, 10, 100, 40)
-houses_button = Button("Houses", 340, 10, 100, 40)
-tool_buttons = [road_button, select_button, hexagon_button, houses_button]
+street_button = Button("Street", 10, 10, 90, 40)
+path_button = Button("Path", 110, 10, 90, 40)
+select_button = Button("Select", 210, 10, 90, 40)
+hexagon_button = Button("Hexagon", 310, 10, 90, 40)
+houses_button = Button("Houses", 410, 10, 90, 40)
+park_button = Button("Park", 510, 10, 90, 40)
+tool_buttons = [street_button, path_button, select_button, hexagon_button, houses_button, park_button]
 
-angle_snap_button = Button("Snap 30°", 460, 6, 90, 24, use_font=small_font)
-grid_snap_button = Button("Snap Grid", 460, 32, 90, 24, use_font=small_font)
+angle_snap_button = Button("Snap 30°", 620, 6, 90, 24, use_font=small_font)
+grid_snap_button = Button("Snap Grid", 620, 32, 90, 24, use_font=small_font)
 angle_snap_button.selected = True
 grid_snap_button.selected = True
 toggle_buttons = [angle_snap_button, grid_snap_button]
 
-export_button = Button("Export CSV", 790, 17, 100, 26, use_font=small_font)
+export_button = Button("Export CSV", 730, 17, 100, 26, use_font=small_font)
 
 STATUS_MESSAGE_DURATION_MS = 5000
 
 selected_tool = None
 roads = []
 houses = []
+parks = []
 status_message = ""
 status_message_expiry = 0
 
@@ -100,6 +109,7 @@ hex_down_raw = None
 
 hovered_road = None
 hovered_house = None
+hovered_park = None
 
 
 def select_tool(button):
@@ -198,6 +208,8 @@ def collinear(a, b, c):
 
 def try_merge_once(new_road):
     for road in roads:
+        if road["type"] != new_road["type"]:
+            continue
         if points_close(road["end"], new_road["start"]):
             shared, far_existing, far_new = road["end"], road["start"], new_road["end"]
         elif points_close(road["start"], new_road["start"]):
@@ -210,7 +222,7 @@ def try_merge_once(new_road):
             continue
         if collinear(far_existing, shared, far_new):
             roads.remove(road)
-            return {"start": far_existing, "end": far_new}
+            return {"start": far_existing, "end": far_new, "type": new_road["type"]}
     return None
 
 
@@ -301,27 +313,37 @@ def violates_min_spacing(start, end):
     return False
 
 
-def add_merged_segment(start, end):
+def add_merged_segment(start, end, road_type="street"):
     if points_close(start, end):
         return
-    new_road = {"start": start, "end": end}
+    new_road = {"start": start, "end": end, "type": road_type}
     while True:
         merged = try_merge_once(new_road)
         if merged is None:
             break
         new_road = merged
     roads.append(new_road)
-    clear_status()
+    road_polygon = road_to_polygon(new_road)
+    destroyed = [house for house in houses if polygons_overlap(house, road_polygon, tol=0)]
+    for house in destroyed:
+        houses.remove(house)
+    if road_type == "street":
+        recalculate_parks_for_polygon(road_polygon)
+    if destroyed:
+        refresh_all_parks()
+        set_status("Placed {} and removed {} house(s)".format(road_type, len(destroyed)))
+    else:
+        clear_status()
 
 
-def add_road(start, end):
+def add_road(start, end, road_type="street"):
     if points_close(start, end):
         return
     if violates_min_spacing(start, end):
         set_status("Road rejected: too close to an existing intersection")
         return
     for seg_start, seg_end in subtract_overlaps(start, end):
-        add_merged_segment(seg_start, seg_end)
+        add_merged_segment(seg_start, seg_end, road_type)
 
 
 def compute_hexagon_vertices(v1, v2):
@@ -380,7 +402,13 @@ def polygons_overlap(poly_a, poly_b, tol=OVERLAP_TOLERANCE):
     return True
 
 
-def road_to_polygon(road, width=ROAD_DRAW_WIDTH):
+def road_width(road):
+    return PATH_DRAW_WIDTH if road.get("type") == "path" else ROAD_DRAW_WIDTH
+
+
+def road_to_polygon(road, width=None):
+    if width is None:
+        width = road_width(road)
     start, end = road["start"], road["end"]
     dir_unit = normalize((end[0] - start[0], end[1] - start[1]))
     perp = (-dir_unit[1], dir_unit[0])
@@ -394,10 +422,12 @@ def road_to_polygon(road, width=ROAD_DRAW_WIDTH):
     ]
 
 
-def find_road_near(pos, threshold=ROAD_HOVER_THRESHOLD):
+def find_road_near(pos, threshold=ROAD_HOVER_THRESHOLD, road_type=None):
     nearest = None
     nearest_dist = threshold
     for road in roads:
+        if road_type is not None and road["type"] != road_type:
+            continue
         d = point_segment_distance(pos, road["start"], road["end"])
         if d <= nearest_dist:
             nearest = road
@@ -417,6 +447,8 @@ def place_houses_along_road(road, click_pos):
     if to_click[0] * perp[0] + to_click[1] * perp[1] < 0:
         perp = (-perp[0], -perp[1])
     depth_px = HOUSE_DEPTH_SQUARES * GRID_SIZE
+    edge_offset = road_width(road) / 2
+    edge_start = (start[0] + perp[0] * edge_offset, start[1] + perp[1] * edge_offset)
 
     widths_squares = compute_house_widths(total_squares)
     offset = 0.0
@@ -424,8 +456,8 @@ def place_houses_along_road(road, click_pos):
     skipped_count = 0
     for width_squares in widths_squares:
         width_px = width_squares * GRID_SIZE
-        near1 = point_at(start, dir_unit, offset)
-        near2 = point_at(start, dir_unit, offset + width_px)
+        near1 = point_at(edge_start, dir_unit, offset)
+        near2 = point_at(edge_start, dir_unit, offset + width_px)
         far2 = (near2[0] + perp[0] * depth_px, near2[1] + perp[1] * depth_px)
         far1 = (near1[0] + perp[0] * depth_px, near1[1] + perp[1] * depth_px)
         corners = [near1, near2, far2, far1]
@@ -438,6 +470,7 @@ def place_houses_along_road(road, click_pos):
             skipped_count += 1
         else:
             houses.append(corners)
+            recalculate_parks_for_polygon(corners)
             placed_count += 1
         offset += width_px
 
@@ -449,15 +482,152 @@ def place_houses_along_road(road, click_pos):
         set_status("Placed {} house(s)".format(placed_count))
 
 
+def cell_polygon(col, row):
+    x0, y0 = col * GRID_SIZE, row * GRID_SIZE
+    x1, y1 = x0 + GRID_SIZE, y0 + GRID_SIZE
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+def cell_in_bounds(col, row):
+    x0, y0 = col * GRID_SIZE, row * GRID_SIZE
+    return (
+        x0 >= 0
+        and y0 >= TOOLBAR_HEIGHT
+        and x0 + GRID_SIZE <= SCREEN_WIDTH
+        and y0 + GRID_SIZE <= SCREEN_HEIGHT
+    )
+
+
+def cell_free_for_park(col, row, extra_blocked=frozenset()):
+    if not cell_in_bounds(col, row):
+        return False
+    if (col, row) in extra_blocked:
+        return False
+    poly = cell_polygon(col, row)
+    if any(polygons_overlap(poly, house, tol=0) for house in houses):
+        return False
+    if any(
+        road["type"] == "street" and polygons_overlap(poly, road_to_polygon(road), tol=0)
+        for road in roads
+    ):
+        return False
+    return not any((col, row) in park["cells"] for park in parks)
+
+
+def cell_touches_road(col, row):
+    cx = col * GRID_SIZE + GRID_SIZE / 2
+    cy = row * GRID_SIZE + GRID_SIZE / 2
+    for road in roads:
+        threshold = road_width(road) / 2 + GRID_SIZE / 2 + 1
+        if point_segment_distance((cx, cy), road["start"], road["end"]) <= threshold:
+            return True
+    return False
+
+
+def cells_adjacent(cells_a, cells_b):
+    for c, r in cells_a:
+        for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if (c + dc, r + dr) in cells_b:
+                return True
+    return False
+
+
+def grow_park_region(seed_col, seed_row):
+    if not cell_free_for_park(seed_col, seed_row):
+        return None
+    region = {(seed_col, seed_row)}
+    frontier = [(seed_col, seed_row)]
+    while frontier:
+        col, row = frontier.pop()
+        for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            neighbor = (col + dc, row + dr)
+            if neighbor in region:
+                continue
+            if cell_free_for_park(neighbor[0], neighbor[1]):
+                region.add(neighbor)
+                frontier.append(neighbor)
+    if len(region) < MIN_PARK_SQUARES * MIN_PARK_SQUARES:
+        return None
+    return region
+
+
+def place_park(click_pos):
+    seed_col = int(click_pos[0] // GRID_SIZE)
+    seed_row = int(click_pos[1] // GRID_SIZE)
+    cells = grow_park_region(seed_col, seed_row)
+    if cells is None:
+        set_status("Not enough space for a park (needs at least {}x{})".format(
+            MIN_PARK_SQUARES, MIN_PARK_SQUARES
+        ))
+        return
+    if not any(cell_touches_road(c, r) for c, r in cells):
+        set_status("Park needs street or path access")
+        return
+    merged_cells = set(cells)
+    merged_origins = {(seed_col, seed_row)}
+    for park in list(parks):
+        if cells_adjacent(cells, park["cells"]):
+            merged_cells |= park["cells"]
+            merged_origins |= park["origins"]
+            parks.remove(park)
+    parks.append({"cells": merged_cells, "origins": merged_origins})
+    clear_status()
+
+
+def recalculate_park(park):
+    park["cells"] = set()
+    new_cells = set()
+    surviving_origins = set()
+    for origin in park["origins"]:
+        result = grow_park_region(*origin)
+        if result is not None:
+            new_cells |= result
+            surviving_origins.add(origin)
+    if not new_cells:
+        parks.remove(park)
+    else:
+        park["cells"] = new_cells
+        park["origins"] = surviving_origins
+
+
+def recalculate_parks_for_polygon(polygon):
+    for park in list(parks):
+        if any(polygons_overlap(cell_polygon(*cell), polygon, tol=0) for cell in park["cells"]):
+            recalculate_park(park)
+
+
+def refresh_all_parks():
+    for park in list(parks):
+        recalculate_park(park)
+
+
+def find_hovered_park(pos):
+    col = int(pos[0] // GRID_SIZE)
+    row = int(pos[1] // GRID_SIZE)
+    for park in parks:
+        if (col, row) in park["cells"]:
+            return park
+    return None
+
+
+def format_points(points):
+    return ";".join("{}:{}".format(round(x, 2), round(y, 2)) for x, y in points)
+
+
 def export_roads_to_csv():
     with open(EXPORT_PATH, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["road_id", "start_x", "start_y", "end_x", "end_y"])
+        writer.writerow(["kind", "id", "part", "road_type", "points"])
         for i, road in enumerate(roads):
-            sx, sy = road["start"]
-            ex, ey = road["end"]
-            writer.writerow([i, round(sx, 2), round(sy, 2), round(ex, 2), round(ey, 2)])
-    set_status("Exported {} road(s) to {}".format(len(roads), EXPORT_PATH))
+            writer.writerow(["road", i, 0, road["type"], format_points([road["start"], road["end"]])])
+        for i, house in enumerate(houses):
+            writer.writerow(["house", i, 0, "", format_points(house)])
+        for i, park in enumerate(parks):
+            cell_list = ";".join("{}:{}".format(c, r) for c, r in sorted(park["cells"]))
+            writer.writerow(["park", i, 0, "", cell_list])
+    set_status("Exported {} road(s), {} house(s), {} park(s) to {}".format(
+        len(roads), len(houses), len(parks), EXPORT_PATH
+    ))
 
 
 def draw_grid(surface):
@@ -469,7 +639,8 @@ def draw_grid(surface):
 
 def draw_roads(surface):
     for road in roads:
-        pygame.draw.line(surface, ROAD_COLOR, road["start"], road["end"], ROAD_DRAW_WIDTH)
+        color = PATH_COLOR if road["type"] == "path" else ROAD_COLOR
+        pygame.draw.line(surface, color, road["start"], road["end"], road_width(road))
         pygame.draw.circle(surface, ROAD_ENDPOINT_COLOR, road["start"], 4)
         pygame.draw.circle(surface, ROAD_ENDPOINT_COLOR, road["end"], 4)
 
@@ -478,6 +649,23 @@ def draw_houses(surface):
     for corners in houses:
         pygame.draw.polygon(surface, HOUSE_COLOR, corners)
         pygame.draw.polygon(surface, HOUSE_OUTLINE_COLOR, corners, 2)
+
+
+def draw_parks(surface):
+    for park in parks:
+        cells = park["cells"]
+        for col, row in cells:
+            x0, y0 = col * GRID_SIZE, row * GRID_SIZE
+            pygame.draw.rect(surface, PARK_COLOR, pygame.Rect(x0, y0, GRID_SIZE, GRID_SIZE))
+            x1, y1 = x0 + GRID_SIZE, y0 + GRID_SIZE
+            if (col, row - 1) not in cells:
+                pygame.draw.line(surface, PARK_OUTLINE_COLOR, (x0, y0), (x1, y0), 2)
+            if (col, row + 1) not in cells:
+                pygame.draw.line(surface, PARK_OUTLINE_COLOR, (x0, y1), (x1, y1), 2)
+            if (col - 1, row) not in cells:
+                pygame.draw.line(surface, PARK_OUTLINE_COLOR, (x0, y0), (x0, y1), 2)
+            if (col + 1, row) not in cells:
+                pygame.draw.line(surface, PARK_OUTLINE_COLOR, (x1, y0), (x1, y1), 2)
 
 
 def point_segment_distance(point, a, b):
@@ -493,11 +681,12 @@ def point_segment_distance(point, a, b):
 
 def houses_on_road(road):
     start, end = road["start"], road["end"]
+    edge_tolerance = road_width(road) / 2 + OVERLAP_TOLERANCE
     return [
         house
         for house in houses
-        if point_segment_distance(house[0], start, end) <= OVERLAP_TOLERANCE
-        and point_segment_distance(house[1], start, end) <= OVERLAP_TOLERANCE
+        if point_segment_distance(house[0], start, end) <= edge_tolerance
+        and point_segment_distance(house[1], start, end) <= edge_tolerance
     ]
 
 
@@ -555,9 +744,11 @@ while running:
     if selected_tool == "Select" and mouse_pos[1] > TOOLBAR_HEIGHT:
         hovered_house = find_hovered_house(mouse_pos)
         hovered_road = None if hovered_house is not None else find_hovered_road(mouse_pos)
+        hovered_park = None if (hovered_house is not None or hovered_road is not None) else find_hovered_park(mouse_pos)
     else:
         hovered_road = None
         hovered_house = None
+        hovered_park = None
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -568,6 +759,7 @@ while running:
                 if hovered_house is not None:
                     houses.remove(hovered_house)
                     hovered_house = None
+                    refresh_all_parks()
                     set_status("Deleted house")
                 elif hovered_road is not None:
                     attached_houses = houses_on_road(hovered_road)
@@ -575,10 +767,15 @@ while running:
                         houses.remove(house)
                     roads.remove(hovered_road)
                     hovered_road = None
+                    refresh_all_parks()
                     if attached_houses:
                         set_status("Deleted road and {} house(s)".format(len(attached_houses)))
                     else:
                         set_status("Deleted road")
+                elif hovered_park is not None:
+                    parks.remove(hovered_park)
+                    hovered_park = None
+                    set_status("Deleted park")
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             clicked_ui = False
@@ -595,7 +792,7 @@ while running:
                 clicked_ui = True
 
             if not clicked_ui and event.pos[1] > TOOLBAR_HEIGHT:
-                if selected_tool == "Road":
+                if selected_tool in ("Street", "Path"):
                     drag_start = resolve_point(event.pos)
                     drag_end = drag_start
                 elif selected_tool == "Hexagon":
@@ -609,16 +806,21 @@ while running:
                         hex_state = "second_down"
                 elif selected_tool == "Houses":
                     target_road = find_road_near(event.pos)
-                    if target_road is not None:
-                        place_houses_along_road(target_road, event.pos)
-                    else:
+                    if target_road is None:
                         set_status("No road nearby to place houses on")
+                    elif target_road["type"] == "path":
+                        set_status("Can't place houses on a path")
+                    else:
+                        place_houses_along_road(target_road, event.pos)
+                elif selected_tool == "Park":
+                    place_park(event.pos)
 
         elif event.type == pygame.MOUSEBUTTONUP:
             if drag_start is not None:
                 pos = clamp_to_canvas(event.pos)
                 final_end = resolve_point(pos, start=drag_start)
-                add_road(drag_start, final_end)
+                road_type = "path" if selected_tool == "Path" else "street"
+                add_road(drag_start, final_end, road_type)
                 drag_start = None
                 drag_end = None
 
@@ -646,10 +848,17 @@ while running:
 
     screen.fill(BG_COLOR)
     draw_grid(screen)
-    if hovered_road is not None:
-        pygame.draw.line(screen, HOVER_COLOR, hovered_road["start"], hovered_road["end"], 12)
+    draw_parks(screen)
+    if hovered_park is not None:
+        for cell in hovered_park["cells"]:
+            pygame.draw.rect(screen, HOVER_COLOR, pygame.Rect(
+                cell[0] * GRID_SIZE, cell[1] * GRID_SIZE, GRID_SIZE, GRID_SIZE
+            ), 2)
     draw_houses(screen)
     draw_roads(screen)
+    if hovered_road is not None:
+        border_polygon = road_to_polygon(hovered_road, width=road_width(hovered_road) + 6)
+        pygame.draw.polygon(screen, HOVER_COLOR, border_polygon, 3)
     if hovered_house is not None:
         pygame.draw.polygon(screen, HOVER_COLOR, hovered_house, 4)
 
@@ -669,7 +878,10 @@ while running:
 
     if status_message:
         status_surface = small_font.render(status_message, True, TEXT_COLOR)
-        screen.blit(status_surface, (570, 22))
+        padding = 8
+        bg_rect = status_surface.get_rect(topleft=(padding, padding)).inflate(padding, padding)
+        pygame.draw.rect(screen, STATUS_BG_COLOR, bg_rect, border_radius=4)
+        screen.blit(status_surface, (padding, padding))
 
     pygame.display.flip()
     clock.tick(60)
