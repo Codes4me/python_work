@@ -7,7 +7,7 @@ pygame.init()
 
 SCREEN_WIDTH = 900
 SCREEN_HEIGHT = 600
-TOOLBAR_HEIGHT = 100
+TOOLBAR_HEIGHT = 140
 
 GRID_SIZE = 20
 ANGLE_STEP_DEGREES = 30
@@ -36,7 +36,14 @@ EXPORT_PATH = "roads.csv"
 SERVICE_DEMAND_RATIO = 7.75 / 49.6
 COMMERCIAL_DEMAND_RATIO = 11.4 / 49.6
 INDUSTRIAL_DEMAND_RATIO = 13.2 / 49.6
-POPULATION_PER_RESIDENTIAL_SQUARE = 0.0388278983
+POPULATION_PER_RESIDENTIAL_SQUARE = 0.16
+
+RESIDENTIAL_TAX_PER_CAPITA = 45.0
+COMMERCIAL_TAX_PER_SQUARE = 3.0
+INDUSTRIAL_TAX_PER_SQUARE = 2.5
+SERVICE_TAX_PER_SQUARE = 2.75
+STREET_UPKEEP_PER_SQUARE = 1.5
+PATH_UPKEEP_PER_SQUARE = 0.5
 
 BG_COLOR = (40, 44, 52)
 GRID_COLOR = (55, 60, 70)
@@ -119,7 +126,8 @@ angle_snap_button.selected = True
 grid_snap_button.selected = True
 toggle_buttons = [angle_snap_button, grid_snap_button]
 
-export_button = Button("Export CSV", 786, 62, 100, 26, use_font=small_font)
+export_button = Button("Export CSV", 634, 62, 100, 26, use_font=small_font)
+import_button = Button("Import CSV", 744, 62, 100, 26, use_font=small_font)
 
 STATUS_MESSAGE_DURATION_MS = 5000
 
@@ -597,13 +605,13 @@ def draw_demand_row(surface):
     demand, supply = compute_demand()
     x, y = 6, 62
 
-    population_rect = pygame.Rect(x, y, 175, 26)
+    population_rect = pygame.Rect(x, y, 110, 26)
     pygame.draw.rect(surface, POPULATION_BG_COLOR, population_rect, border_radius=4)
     population_surface = small_font.render("Pop: {:.1f}".format(compute_population()), True, TEXT_COLOR)
     surface.blit(population_surface, population_surface.get_rect(center=population_rect.center))
-    x += 175 + 8
+    x += 110 + 8
 
-    badge_width = 185
+    badge_width = 160
     for kind in ("service", "commercial", "industrial"):
         met = supply[kind] >= demand[kind]
         bg_color = DEMAND_OK_COLOR if met else DEMAND_SHORT_COLOR
@@ -614,6 +622,38 @@ def draw_demand_row(surface):
         text_rect = text_surface.get_rect(center=rect.center)
         surface.blit(text_surface, text_rect)
         x += badge_width + 10
+
+
+def compute_income():
+    _, supply = compute_demand()
+    population = compute_population()
+    residential_tax = population * RESIDENTIAL_TAX_PER_CAPITA
+    commercial_tax = supply["commercial"] * COMMERCIAL_TAX_PER_SQUARE
+    industrial_tax = supply["industrial"] * INDUSTRIAL_TAX_PER_SQUARE
+    service_tax = supply["service"] * SERVICE_TAX_PER_SQUARE
+    revenue = residential_tax + commercial_tax + industrial_tax + service_tax
+
+    street_squares = sum(
+        math.floor(distance(r["start"], r["end"]) / GRID_SIZE) for r in roads if r["type"] == "street"
+    )
+    path_squares = sum(
+        math.floor(distance(r["start"], r["end"]) / GRID_SIZE) for r in roads if r["type"] == "path"
+    )
+    upkeep = street_squares * STREET_UPKEEP_PER_SQUARE + path_squares * PATH_UPKEEP_PER_SQUARE
+
+    return revenue, upkeep, revenue - upkeep
+
+
+def draw_income_row(surface):
+    revenue, upkeep, net = compute_income()
+    bg_color = DEMAND_OK_COLOR if net >= 0 else DEMAND_SHORT_COLOR
+    label = "Net Income: {}${:.2f}  (Tax ${:.2f} - Upkeep ${:.2f})".format(
+        "+" if net >= 0 else "-", abs(net), revenue, upkeep
+    )
+    rect = pygame.Rect(6, 96, SCREEN_WIDTH - 12, 30)
+    pygame.draw.rect(surface, bg_color, rect, border_radius=4)
+    text_surface = small_font.render(label, True, TEXT_COLOR)
+    surface.blit(text_surface, text_surface.get_rect(center=rect.center))
 
 
 def cell_polygon(col, row):
@@ -760,6 +800,77 @@ def export_roads_to_csv():
             cell_list = ";".join("{}:{}".format(c, r) for c, r in sorted(park["cells"]))
             writer.writerow(["park", i, 0, "", cell_list])
     set_status("Exported {} road(s), {} building(s), {} park(s) to {}".format(
+        len(roads), len(buildings), len(parks), EXPORT_PATH
+    ))
+
+
+def parse_points(points_str):
+    points = []
+    for pair in points_str.split(";"):
+        if not pair:
+            continue
+        x_str, y_str = pair.split(":")
+        points.append((float(x_str), float(y_str)))
+    return points
+
+
+def import_town_from_csv():
+    try:
+        f = open(EXPORT_PATH, newline="")
+    except FileNotFoundError:
+        set_status("No {} found to import".format(EXPORT_PATH))
+        return
+
+    new_roads = []
+    new_buildings = []
+    park_cells_by_id = {}
+    with f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            kind = row["kind"]
+            if kind == "road":
+                points = parse_points(row["points"])
+                if len(points) < 2:
+                    continue
+                new_roads.append({"start": points[0], "end": points[1], "type": row["detail"]})
+            elif kind == "building":
+                points = parse_points(row["points"])
+                if len(points) < 4:
+                    continue
+                width_px = distance(points[0], points[1])
+                depth_px = distance(points[1], points[2])
+                new_buildings.append({
+                    "corners": points,
+                    "kind": row["detail"],
+                    "width_squares": max(1, round(width_px / GRID_SIZE)),
+                    "depth_squares": max(1, round(depth_px / GRID_SIZE)),
+                })
+            elif kind == "park":
+                cells = set()
+                for pair in row["points"].split(";"):
+                    if not pair:
+                        continue
+                    c_str, r_str = pair.split(":")
+                    cells.add((int(c_str), int(r_str)))
+                park_cells_by_id.setdefault(row["id"], set()).update(cells)
+
+    roads.clear()
+    roads.extend(new_roads)
+    buildings.clear()
+    buildings.extend(new_buildings)
+    parks.clear()
+    for cells in park_cells_by_id.values():
+        if not cells:
+            continue
+        parks.append({"cells": cells, "origins": {next(iter(cells))}})
+
+    reset_hex_state()
+    global selected_tool
+    for button in tool_buttons:
+        button.selected = False
+    selected_tool = None
+
+    set_status("Imported {} road(s), {} building(s), {} park(s) from {}".format(
         len(roads), len(buildings), len(parks), EXPORT_PATH
     ))
 
@@ -925,6 +1036,9 @@ while running:
             if export_button.is_clicked(event.pos):
                 export_roads_to_csv()
                 clicked_ui = True
+            if import_button.is_clicked(event.pos):
+                import_town_from_csv()
+                clicked_ui = True
 
             if not clicked_ui and event.pos[1] > TOOLBAR_HEIGHT:
                 if selected_tool in ("Street", "Path"):
@@ -1019,7 +1133,9 @@ while running:
     for button in toggle_buttons:
         button.draw(screen)
     export_button.draw(screen)
+    import_button.draw(screen)
     draw_demand_row(screen)
+    draw_income_row(screen)
 
     if status_message:
         status_surface = small_font.render(status_message, True, TEXT_COLOR)
