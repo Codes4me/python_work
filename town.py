@@ -45,6 +45,10 @@ SERVICE_TAX_PER_SQUARE = 2.75
 STREET_UPKEEP_PER_SQUARE = 1.5
 PATH_UPKEEP_PER_SQUARE = 0.5
 
+COMMERCIAL_JOBS_PER_SQUARE = 1
+INDUSTRIAL_JOBS_PER_SQUARE = 1
+SERVICE_JOBS_PER_SQUARE = 2
+
 BG_COLOR = (40, 44, 52)
 GRID_COLOR = (55, 60, 70)
 TOOLBAR_COLOR = (25, 28, 34)
@@ -624,10 +628,22 @@ def draw_demand_row(surface):
         x += badge_width + 10
 
 
+def compute_employment_rate(population, supply):
+    if population <= 0:
+        return 0.0
+    jobs = (
+        supply["commercial"] * COMMERCIAL_JOBS_PER_SQUARE
+        + supply["industrial"] * INDUSTRIAL_JOBS_PER_SQUARE
+        + supply["service"] * SERVICE_JOBS_PER_SQUARE
+    )
+    return min(1.0, jobs / population)
+
+
 def compute_income():
     _, supply = compute_demand()
     population = compute_population()
-    residential_tax = population * RESIDENTIAL_TAX_PER_CAPITA
+    employment_rate = compute_employment_rate(population, supply)
+    residential_tax = population * RESIDENTIAL_TAX_PER_CAPITA * employment_rate
     commercial_tax = supply["commercial"] * COMMERCIAL_TAX_PER_SQUARE
     industrial_tax = supply["industrial"] * INDUSTRIAL_TAX_PER_SQUARE
     service_tax = supply["service"] * SERVICE_TAX_PER_SQUARE
